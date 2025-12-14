@@ -228,7 +228,7 @@ func (d *ControllerService) CreateVolume(ctx context.Context, request *csi.Creat
 		}
 	}
 
-	storageConfig, err := cl.GetClusterStorage(ctx, params.StorageID)
+	storageConfigResource, err := cl.GetClusterStorage(ctx, params.StorageID)
 	if err != nil {
 		klog.ErrorS(err, "CreateVolume: failed to get proxmox storage config", "cluster", region, "storage", params.StorageID)
 
@@ -244,36 +244,53 @@ func (d *ControllerService) CreateVolume(ctx context.Context, request *csi.Creat
 		},
 	}
 
-	isShared := isSharedStorage(storageConfig, params)
+	isShared := isSharedStorage(storageConfigResource, params)
 
 	if isShared {
 		// https://pve.proxmox.com/wiki/Storage only block/local storage are supported
-		switch storageConfig.PluginType {
+		switch storageConfigResource.PluginType {
 		case "cifs", "pbs": // nolint: goconst
 			return nil, status.Error(codes.Internal, "error: shared storage type cifs, pbs are not supported")
 		case "lvm", "lvmthin": // nolint: goconst
 			if !params.ForceShared {
 				klog.V(2).InfoS("CreateVolume: LVM storage not configured as shared, treating as local",
-					"storage", params.StorageID, "pluginType", storageConfig.PluginType)
+					"storage", params.StorageID, "pluginType", storageConfigResource.PluginType)
 			} else {
 				klog.V(3).InfoS("CreateVolume: LVM configured as shared",
 					"storage", params.StorageID)
 			}
 		}
 
-		topology = []*csi.Topology{
-			{
-				Segments: map[string]string{
-					corev1.LabelTopologyRegion: region,
-				},
-			},
+		// For shared storage, return topology for all accessible nodes/zones
+		// Get full storage config to access Nodes field
+		storageConfig, err := cl.Client.ClusterStorage(ctx, params.StorageID)
+		if err != nil {
+			klog.ErrorS(err, "CreateVolume: failed to get detailed storage config", "cluster", region, "storage", params.StorageID)
+			// Fallback to single zone if we can't get node list
+		} else if storageConfig.Nodes != "" {
+			topology = []*csi.Topology{}
+			nodes := strings.Split(storageConfig.Nodes, ",")
+			for _, node := range nodes {
+				topology = append(topology, &csi.Topology{
+					Segments: map[string]string{
+						corev1.LabelTopologyRegion: region,
+						corev1.LabelTopologyZone:   strings.TrimSpace(node),
+					},
+				})
+			}
+			klog.V(4).InfoS("CreateVolume: shared storage accessible from zones",
+				"storage", params.StorageID, "zones", storageConfig.Nodes)
+		} else {
+			// If nodes list is empty, keep single topology with current zone
+			klog.V(4).InfoS("CreateVolume: shared storage with no nodes list, using current zone",
+				"storage", params.StorageID, "zone", zone)
 		}
 	}
 
 	id := vmID
 
 	if params.Replicate {
-		if storageConfig.PluginType != "zfspool" {
+		if storageConfigResource.PluginType != "zfspool" {
 			return nil, status.Error(codes.Internal, "error: storage type is not zfs in replication mode")
 		}
 
@@ -297,7 +314,7 @@ func (d *ControllerService) CreateVolume(ctx context.Context, request *csi.Creat
 	}
 
 	format := ""
-	if getStorageLevel(storageConfig) == "file" {
+	if getStorageLevel(storageConfigResource) == "file" {
 		format = "raw"
 		if params.StorageFormat == "qcow2" {
 			format = params.StorageFormat

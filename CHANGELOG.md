@@ -5,6 +5,13 @@
 
 * enable support for capmox ([6145c7d](https://github.com/sergelogvinov/proxmox-csi-plugin/commit/6145c7d91cfc47c131ac453e2a90a915e5694b2b))
 
+## [0.18.1](https://github.com/adi/proxmox-csi-plugin/compare/v0.18.0...v0.18.1) (2025-12-14)
+
+
+### Bug Fixes
+
+* resolve klog build error and update image registry to ghcr.io/adi ([aadbe35](https://github.com/adi/proxmox-csi-plugin/commit/aadbe354c6819c86c3e7cdc9b6b76bf70e40a72a))
+
 ## [0.18.0](https://github.com/adi/proxmox-csi-plugin/compare/v0.17.0...v0.18.0) (2025-12-14)
 
 

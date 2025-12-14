@@ -5,6 +5,13 @@
 
 * enable support for capmox ([6145c7d](https://github.com/sergelogvinov/proxmox-csi-plugin/commit/6145c7d91cfc47c131ac453e2a90a915e5694b2b))
 
+## [0.18.2](https://github.com/adi/proxmox-csi-plugin/compare/v0.18.1...v0.18.2) (2025-12-14)
+
+
+### Bug Fixes
+
+* return multi-zone topology for shared storage to prevent PV binding failures ([8c41d69](https://github.com/adi/proxmox-csi-plugin/commit/8c41d69ea4ac72962d2a55e91fa14f9b9d5bfd01))
+
 ## [0.18.1](https://github.com/adi/proxmox-csi-plugin/compare/v0.18.0...v0.18.1) (2025-12-14)
 
 

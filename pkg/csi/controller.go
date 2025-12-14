@@ -253,7 +253,7 @@ func (d *ControllerService) CreateVolume(ctx context.Context, request *csi.Creat
 			return nil, status.Error(codes.Internal, "error: shared storage type cifs, pbs are not supported")
 		case "lvm", "lvmthin": // nolint: goconst
 			if !params.ForceShared {
-				klog.WarningS(nil, "CreateVolume: LVM storage not configured as shared, treating as local",
+				klog.V(2).InfoS("CreateVolume: LVM storage not configured as shared, treating as local",
 					"storage", params.StorageID, "pluginType", storageConfig.PluginType)
 			} else {
 				klog.V(3).InfoS("CreateVolume: LVM configured as shared",

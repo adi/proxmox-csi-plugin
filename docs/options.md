@@ -123,6 +123,8 @@ metadata:
 * `replicateSchedule` - replication schedule [in systemd calendar format](https://pve.proxmox.com/pve-docs/pve-admin-guide.html#pvesr_schedule_time_format) (default: `*/15`)
 * `replicateZones` - zones where the disk will be replicated, separated by commas, support up to 2 zones
 
+* `forceShared` - set true to treat storage as shared, enabling volume mobility between nodes. **Use case**: Shared LVM storage (e.g., Alletra VG, shared SAN) that is not automatically detected by Proxmox as shared storage. **IMPORTANT**: Only use for LVM storage that is actually accessible from all nodes in the cluster. Using this on local LVM will cause data corruption.
+
 ## AllowVolumeExpansion
 
 Allow you to resize (expand) the PVC in future.

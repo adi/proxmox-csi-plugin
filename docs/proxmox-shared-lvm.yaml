@@ -1,0 +1,30 @@
+allowVolumeExpansion: true
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: proxmox-shared-lvm
+parameters:
+  csi.storage.k8s.io/fstype: xfs
+
+  # Proxmox storage ID for shared LVM
+  storage: alletra-vg
+
+  # CRITICAL: Mark LVM as shared to enable volume mobility
+  # This tells the CSI driver that the storage is accessible from all nodes
+  # and removes zone constraints from persistent volumes
+  forceShared: "true"
+
+  # Recommended settings for shared block storage
+  cache: directsync
+  ssd: "true"
+
+  # Optional: Performance tuning
+  diskIOPS: "4000"
+  diskMBps: "1000"
+
+provisioner: csi.proxmox.sinextra.dev
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+
+# IMPORTANT: DO NOT set allowedTopologies for shared storage
+# Volumes must be able to move to any node in the region

@@ -75,6 +75,8 @@ type StorageParameters struct {
 	ReplicateSchedule string `json:"replicateSchedule,omitempty"`
 	ReplicateZones    string `json:"replicateZones,omitempty"`
 
+	ForceShared bool `json:"forceShared,omitempty"`
+
 	ResizeRequired  *bool `json:"resizeRequired,omitempty"`
 	ResizeSizeBytes int64 `json:"resizeSizeBytes,omitempty"`
 }

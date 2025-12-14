@@ -31,6 +31,7 @@ import (
 	goproxmox "github.com/sergelogvinov/go-proxmox"
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/metrics"
 	volume "github.com/sergelogvinov/proxmox-csi-plugin/pkg/utils/volume"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -380,7 +381,23 @@ func attachVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *vol
 					Value: fmt.Sprintf("%s:%s,%s", vol.Storage(), vol.Disk(), strings.Join(opt, ",")),
 				}
 
-				task, err := vm.Config(ctx, vmOptions)
+				var task *proxmox.Task
+				err = retry.Exponential(30*time.Second, retry.WithUnits(100*time.Millisecond)).Retry(func() error {
+					t, err := vm.Config(ctx, vmOptions)
+					if err != nil {
+						if strings.Contains(err.Error(), "Configuration file locked") ||
+							strings.Contains(err.Error(), "locked") {
+							klog.V(4).InfoS("attachVolume: VM config locked, retrying", "vmID", id)
+
+							return retry.ExpectedError(err)
+						}
+
+						return err
+					}
+					task = t
+
+					return nil
+				})
 				if err != nil {
 					return nil, fmt.Errorf("unable to attach disk: %v, options=%+v", err, vmOptions)
 				}
@@ -536,6 +553,25 @@ func waitAttachVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol 
 	}
 
 	return nil
+}
+
+func waitDetachVolume(ctx context.Context, cl *goproxmox.APIClient, id int, vol *volume.Volume, timeout time.Duration) error {
+	return retry.Constant(timeout, retry.WithUnits(1*time.Second)).Retry(func() error {
+		vm, err := cl.GetVMConfig(ctx, id)
+		if err != nil {
+			klog.V(5).InfoS("waitDetachVolume: failed to get VM config", "vmID", id, "error", err)
+
+			return err
+		}
+
+		if _, attached := isVolumeAttached(vm.VirtualMachineConfig, vol.Disk()); attached {
+			return retry.ExpectedError(fmt.Errorf("volume still attached"))
+		}
+
+		klog.V(5).InfoS("waitDetachVolume: volume detached", "vmID", id, "volumeID", vol.VolumeID())
+
+		return nil
+	})
 }
 
 // For shared storage, get all nodes that have access to the storage, to emulate real shared storage behavior.

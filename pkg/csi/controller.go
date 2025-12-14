@@ -32,6 +32,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/luthermonson/go-proxmox"
 	goproxmox "github.com/sergelogvinov/go-proxmox"
 	csiconfig "github.com/sergelogvinov/proxmox-csi-plugin/pkg/config"
 	"github.com/sergelogvinov/proxmox-csi-plugin/pkg/helpers/ptr"
@@ -114,6 +115,15 @@ func (d *ControllerService) Init() {
 	if d.storageCapacity == nil {
 		d.storageCapacity = cache.New(time.Minute, 5*time.Minute)
 	}
+}
+
+// isSharedStorage determines if storage should be treated as shared
+func isSharedStorage(storageConfig *proxmox.ClusterResource, params StorageParameters) bool {
+	if params.ForceShared {
+		return true
+	}
+
+	return storageConfig.Shared == 1
 }
 
 // CreateVolume creates a volume
@@ -234,11 +244,21 @@ func (d *ControllerService) CreateVolume(ctx context.Context, request *csi.Creat
 		},
 	}
 
-	if storageConfig.Shared == 1 {
+	isShared := isSharedStorage(storageConfig, params)
+
+	if isShared {
 		// https://pve.proxmox.com/wiki/Storage only block/local storage are supported
 		switch storageConfig.PluginType {
 		case "cifs", "pbs": // nolint: goconst
 			return nil, status.Error(codes.Internal, "error: shared storage type cifs, pbs are not supported")
+		case "lvm", "lvmthin": // nolint: goconst
+			if !params.ForceShared {
+				klog.WarningS(nil, "CreateVolume: LVM storage not configured as shared, treating as local",
+					"storage", params.StorageID, "pluginType", storageConfig.PluginType)
+			} else {
+				klog.V(3).InfoS("CreateVolume: LVM configured as shared",
+					"storage", params.StorageID)
+			}
 		}
 
 		topology = []*csi.Topology{
@@ -363,7 +383,7 @@ func (d *ControllerService) CreateVolume(ctx context.Context, request *csi.Creat
 		}
 	}
 
-	if storageConfig.Shared == 1 || params.Replicate {
+	if isShared || params.Replicate {
 		volumeID = vol.VolumeSharedID()
 	}
 
@@ -521,6 +541,62 @@ func (d *ControllerService) ControllerPublishVolume(ctx context.Context, request
 		return nil, err
 	}
 
+	// Get storage config to determine if shared
+	storageConfig, err := cl.GetClusterStorage(ctx, vol.Storage())
+	if err != nil {
+		klog.ErrorS(err, "ControllerPublishVolume: failed to get storage config",
+			"cluster", vol.Cluster(), "storage", vol.Storage())
+
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	isShared := isSharedStorage(storageConfig, params)
+
+	// CRITICAL: For shared storage, prevent split-brain
+	if isShared {
+		klog.V(5).InfoS("ControllerPublishVolume: checking for existing attachments on shared storage",
+			"volumeID", vol.VolumeID(), "targetVM", id)
+
+		existingVMID, existingLUN, err := getVMByAttachedVolume(ctx, cl, vol)
+		if err != nil && err != goproxmox.ErrNotFound {
+			klog.ErrorS(err, "ControllerPublishVolume: failed to check existing attachments",
+				"volumeID", vol.VolumeID())
+
+			return nil, status.Error(codes.Internal, fmt.Sprintf("failed to check existing attachments: %v", err))
+		}
+
+		if existingVMID != 0 {
+			if existingVMID == id {
+				// Already attached to target VM - idempotent
+				klog.V(3).InfoS("ControllerPublishVolume: volume already attached to target VM",
+					"volumeID", vol.VolumeID(), "vmID", id, "lun", existingLUN)
+
+				wwm := fmt.Sprintf("%x", fmt.Sprintf("PVC-ID%02d", existingLUN))
+
+				return &csi.ControllerPublishVolumeResponse{
+					PublishContext: map[string]string{
+						"DevicePath": "/dev/disk/by-id/wwn-0x" + wwm,
+						"lun":        strconv.Itoa(existingLUN),
+					},
+				}, nil
+			}
+
+			// SPLIT-BRAIN PROTECTION
+			klog.ErrorS(nil, "ControllerPublishVolume: SPLIT-BRAIN PROTECTION TRIGGERED",
+				"volumeID", vol.VolumeID(),
+				"currentVM", existingVMID,
+				"requestedVM", id,
+				"lun", existingLUN)
+
+			return nil, status.Errorf(codes.FailedPrecondition,
+				"volume %s is already attached to VM %d (LUN %d), cannot attach to VM %d - potential data corruption prevented",
+				vol.VolumeID(), existingVMID, existingLUN, id)
+		}
+
+		klog.V(5).InfoS("ControllerPublishVolume: no existing attachments found, safe to proceed",
+			"volumeID", vol.VolumeID(), "targetVM", id)
+	}
+
 	d.vmLocks.Lock(n.GetNodeName())
 	defer d.vmLocks.Unlock(n.GetNodeName())
 
@@ -609,11 +685,41 @@ func (d *ControllerService) ControllerUnpublishVolume(ctx context.Context, reque
 	d.vmLocks.Lock(n.GetNodeName())
 	defer d.vmLocks.Unlock(n.GetNodeName())
 
+	// Verify volume is attached before attempting detach
+	vm, err := cl.GetVMConfig(ctx, id)
+	if err != nil {
+		klog.V(3).InfoS("ControllerUnpublishVolume: failed to get VM config, assuming already detached",
+			"volumeID", vol.VolumeID(), "vmID", id, "error", err)
+
+		return &csi.ControllerUnpublishVolumeResponse{}, nil
+	}
+
+	lun, isAttached := isVolumeAttached(vm.VirtualMachineConfig, vol.Disk())
+	if !isAttached {
+		klog.V(3).InfoS("ControllerUnpublishVolume: volume not attached, assuming already detached",
+			"volumeID", vol.VolumeID(), "vmID", id)
+
+		return &csi.ControllerUnpublishVolumeResponse{}, nil
+	}
+
+	klog.V(4).InfoS("ControllerUnpublishVolume: volume confirmed attached, proceeding with detach",
+		"volumeID", vol.VolumeID(), "vmID", id, "lun", lun)
+
 	mc := metrics.NewMetricContext("detachVolume")
 	if err := detachVolume(ctx, cl, id, vol); mc.ObserveRequest(err) != nil {
-		klog.ErrorS(err, "ControllerUnpublishVolume: failed to detach volume", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "vmID", id)
+		klog.ErrorS(err, "ControllerUnpublishVolume: failed to detach volume",
+			"cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "nodeID", n.String())
 
 		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	// CRITICAL: Verify detachment completed
+	if err := waitDetachVolume(ctx, cl, id, vol, 30*time.Second); err != nil {
+		klog.ErrorS(err, "ControllerUnpublishVolume: volume still attached after detach",
+			"volumeID", vol.VolumeID(), "vmID", id)
+
+		return nil, status.Error(codes.Internal,
+			"detachment incomplete, volume may still be attached")
 	}
 
 	klog.V(3).InfoS("ControllerUnpublishVolume: volume unpublished", "cluster", vol.Cluster(), "volumeID", vol.VolumeID(), "nodeID", n.String())
